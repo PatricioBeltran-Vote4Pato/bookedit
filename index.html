@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Editor de Libros PDF</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=DM+Sans:wght@300;400;500&family=DM+Mono&display=swap" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --ink: #1a1310;
+    --paper: #faf8f4;
+    --paper-alt: #f3f0e9;
+    --accent: #8b4513;
+    --accent-light: #c4895a;
+    --accent-pale: #f0e8de;
+    --border: rgba(26,19,16,0.12);
+    --border-strong: rgba(26,19,16,0.25);
+    --muted: #7a6e67;
+    --success: #2d6a4f;
+    --success-bg: #d8f3dc;
+    --error: #9b2226;
+    --error-bg: #fce4e4;
+    --sidebar-w: 260px;
+  }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--paper-alt);
+    color: var(--ink);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── TOP BAR ── */
+  header {
+    background: var(--ink);
+    padding: 0 1.5rem;
+    height: 52px;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    flex-shrink: 0;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  header .logo {
+    font-family: 'Playfair Display', serif;
+    font-size: 18px;
+    color: #f0e8de;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+  }
+  header .logo span { color: var(--accent-light); }
+  header .hbar-sep { width: 1px; height: 20px; background: rgba(255,255,255,0.1); }
+  header .file-info {
+    font-size: 12px;
+    color: rgba(240,232,222,0.55);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  header .upload-btn {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+    white-space: nowrap;
+  }
+  header .upload-btn:hover { background: #a0521c; }
+  header .export-btn {
+    background: transparent;
+    color: rgba(240,232,222,0.7);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  header .export-btn:hover { color: #f0e8de; border-color: rgba(255,255,255,0.35); }
+  #file-input { display: none; }
+
+  /* ── MAIN LAYOUT ── */
+  .app-body {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── SIDEBAR ── */
+  aside {
+    width: var(--sidebar-w);
+    background: var(--paper);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    overflow-y: auto;
+  }
+  .sidebar-section {
+    padding: 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .sidebar-title {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    margin-bottom: 10px;
+  }
+
+  /* Page list */
+  .page-list { display: flex; flex-direction: column; gap: 3px; }
+  .page-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--muted);
+    transition: all 0.12s;
+    border: 1px solid transparent;
+  }
+  .page-item:hover { background: var(--paper-alt); color: var(--ink); }
+  .page-item.active { background: var(--accent-pale); color: var(--accent); border-color: rgba(139,69,19,0.15); font-weight: 500; }
+  .page-num { font-family: 'DM Mono', monospace; font-size: 10px; min-width: 22px; }
+
+  /* AI Tools */
+  .ai-tools { display: flex; flex-direction: column; gap: 5px; }
+  .tool-btn {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--paper);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12.5px;
+    color: var(--ink);
+    cursor: pointer;
+    transition: all 0.12s;
+    text-align: left;
+  }
+  .tool-btn:hover { border-color: var(--accent); background: var(--accent-pale); color: var(--accent); }
+  .tool-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .tool-btn .tool-icon { font-size: 14px; flex-shrink: 0; }
+
+  /* Stats */
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .stat-card {
+    background: var(--paper-alt);
+    border-radius: 6px;
+    padding: 8px;
+    text-align: center;
+  }
+  .stat-val { font-size: 18px; font-weight: 500; font-family: 'Playfair Display', serif; color: var(--accent); }
+  .stat-lbl { font-size: 10px; color: var(--muted); margin-top: 1px; }
+
+  /* ── EDITOR AREA ── */
+  main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Toolbar */
+  .editor-toolbar {
+    background: var(--paper);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 1.25rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .toolbar-label { font-size: 11px; color: var(--muted); }
+  .toolbar-sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
+  .fmt-btn {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    width: 28px; height: 28px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--muted);
+    transition: all 0.12s;
+  }
+  .fmt-btn:hover { border-color: var(--border-strong); color: var(--ink); background: var(--paper-alt); }
+  .page-nav {
+    display: flex; align-items: center; gap: 6px;
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .page-nav button {
+    background: none; border: 1px solid var(--border); border-radius: 4px;
+    width: 26px; height: 26px; cursor: pointer; font-size: 11px;
+    color: var(--muted); transition: all 0.12s;
+  }
+  .page-nav button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .page-nav button:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* Editor */
+  .editor-wrapper {
+    flex: 1;
+    overflow-y: auto;
+    padding: 2.5rem 3rem;
+    display: flex;
+    justify-content: center;
+  }
+  .editor-inner { width: 100%; max-width: 680px; }
+  .page-heading {
+    font-family: 'Playfair Display', serif;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 1.5rem;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .page-heading::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  #editor {
+    width: 100%;
+    min-height: 500px;
+    border: none;
+    outline: none;
+    background: transparent;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 15.5px;
+    line-height: 1.8;
+    color: var(--ink);
+    resize: none;
+    caret-color: var(--accent);
+  }
+
+  /* ── EMPTY STATE ── */
+  .empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    color: var(--muted);
+  }
+  .empty-state .empty-icon {
+    width: 80px; height: 100px;
+    border: 2px dashed var(--border-strong);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 28px;
+    color: var(--accent-light);
+    position: relative;
+  }
+  .empty-state h2 { font-family: 'Playfair Display', serif; font-size: 22px; color: var(--ink); }
+  .empty-state p { font-size: 13px; text-align: center; max-width: 300px; }
+  .empty-upload-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 22px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    margin-top: 6px;
+    transition: background 0.15s;
+  }
+  .empty-upload-btn:hover { background: #a0521c; }
+
+  /* ── AI PANEL ── */
+  .ai-panel {
+    background: var(--paper);
+    border-top: 1px solid var(--border);
+    padding: 1rem 1.25rem;
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    flex-shrink: 0;
+    max-height: 240px;
+  }
+  .ai-panel.visible { display: flex; }
+  .ai-panel-header {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.06em;
+  }
+  .ai-panel-header .ai-badge {
+    background: var(--accent-pale);
+    color: var(--accent);
+    border-radius: 4px;
+    padding: 1px 7px;
+    font-size: 10px;
+    font-weight: 500;
+  }
+  .ai-panel-header button {
+    margin-left: auto;
+    background: none; border: none; cursor: pointer;
+    color: var(--muted); font-size: 16px; line-height: 1;
+  }
+  .ai-output {
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--ink);
+    overflow-y: auto;
+    flex: 1;
+    padding-right: 4px;
+  }
+  .ai-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .ai-action-btn {
+    padding: 6px 14px;
+    border-radius: 5px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  .ai-accept { background: var(--accent); color: #fff; border: none; }
+  .ai-accept:hover { background: #a0521c; }
+  .ai-discard { background: none; border: 1px solid var(--border-strong); color: var(--muted); }
+  .ai-discard:hover { color: var(--ink); border-color: var(--ink); }
+
+  /* Spinner */
+  .spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Toast */
+  .toast {
+    position: fixed; bottom: 20px; right: 20px;
+    background: var(--ink); color: #f0e8de;
+    font-size: 13px;
+    padding: 10px 16px;
+    border-radius: 7px;
+    opacity: 0;
+    transition: opacity 0.25s;
+    pointer-events: none;
+    z-index: 999;
+  }
+  .toast.show { opacity: 1; }
+
+  /* Custom instruction bar */
+  .custom-bar {
+    display: none;
+    gap: 6px;
+    align-items: center;
+    padding: 8px 1rem;
+    background: var(--accent-pale);
+    border-top: 1px solid rgba(139,69,19,0.15);
+    flex-shrink: 0;
+  }
+  .custom-bar.visible { display: flex; }
+  .custom-bar input {
+    flex: 1;
+    border: 1px solid rgba(139,69,19,0.25);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    background: #fff;
+    color: var(--ink);
+    outline: none;
+  }
+  .custom-bar input:focus { border-color: var(--accent); }
+  .custom-bar button {
+    background: var(--accent); color: #fff; border: none;
+    border-radius: 6px; padding: 7px 14px;
+    font-family: 'DM Sans', sans-serif; font-size: 12px;
+    cursor: pointer;
+  }
+  .custom-bar .cancel-custom {
+    background: none; border: 1px solid var(--border-strong); color: var(--muted);
+    border-radius: 6px; padding: 7px 10px;
+    font-size: 12px; cursor: pointer;
+  }
+
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 10px; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <span class="logo">libro<span>.</span>edit</span>
+  <div class="hbar-sep"></div>
+  <span class="file-info" id="file-info">Ningún archivo abierto</span>
+  <button class="export-btn" id="export-btn" style="display:none" onclick="exportTxt()">↓ Exportar TXT</button>
+  <button class="upload-btn" onclick="document.getElementById('file-input').click()">📄 Abrir PDF</button>
+  <input type="file" id="file-input" accept=".pdf"/>
+</header>
+
+<!-- Body -->
+<div class="app-body">
+
+  <!-- Sidebar -->
+  <aside>
+    <div class="sidebar-section">
+      <div class="sidebar-title">Páginas</div>
+      <div class="page-list" id="page-list">
+        <div style="font-size:12px;color:var(--muted);text-align:center;padding:1rem 0;">Carga un PDF para comenzar</div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">Herramientas IA</div>
+      <div class="ai-tools">
+        <button class="tool-btn" disabled id="btn-rewrite" onclick="runTool('rewrite')">
+          <span class="tool-icon">✏️</span> Reescribir párrafo
+        </button>
+        <button class="tool-btn" disabled id="btn-grammar" onclick="runTool('grammar')">
+          <span class="tool-icon">📝</span> Corregir gramática
+        </button>
+        <button class="tool-btn" disabled id="btn-summarize" onclick="runTool('summarize')">
+          <span class="tool-icon">📋</span> Resumir página
+        </button>
+        <button class="tool-btn" disabled id="btn-expand" onclick="runTool('expand')">
+          <span class="tool-icon">🔍</span> Expandir texto
+        </button>
+        <button class="tool-btn" disabled id="btn-translate" onclick="runTool('translate')">
+          <span class="tool-icon">🌐</span> Traducir al inglés
+        </button>
+        <button class="tool-btn" disabled id="btn-custom" onclick="showCustomBar()">
+          <span class="tool-icon">💬</span> Instrucción personalizada
+        </button>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">Estadísticas</div>
+      <div class="stats-grid" id="stats-grid">
+        <div class="stat-card"><div class="stat-val" id="stat-pages">—</div><div class="stat-lbl">Páginas</div></div>
+        <div class="stat-card"><div class="stat-val" id="stat-words">—</div><div class="stat-lbl">Palabras</div></div>
+        <div class="stat-card"><div class="stat-val" id="stat-chars">—</div><div class="stat-lbl">Caracteres</div></div>
+        <div class="stat-card"><div class="stat-val" id="stat-edits">0</div><div class="stat-lbl">Ediciones</div></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main>
+    <!-- Empty state -->
+    <div class="empty-state" id="empty-state">
+      <div class="empty-icon">📖</div>
+      <h2>Editor de Libros PDF</h2>
+      <p>Abre un PDF para leer, editar y mejorar tu texto con inteligencia artificial</p>
+      <button class="empty-upload-btn" onclick="document.getElementById('file-input').click()">Abrir PDF →</button>
+    </div>
+
+    <!-- Editor (hidden until file loaded) -->
+    <div id="editor-container" style="display:none;flex:1;flex-direction:column;overflow:hidden;">
+      <div class="editor-toolbar">
+        <span class="toolbar-label">Página actual</span>
+        <div class="toolbar-sep"></div>
+        <button class="fmt-btn" title="Seleccionar todo" onclick="document.getElementById('editor').select()">⊞</button>
+        <button class="fmt-btn" title="Copiar página" onclick="copyPage()">⎘</button>
+        <div class="page-nav">
+          <button id="prev-btn" onclick="gotoPage(currentPage-1)">‹</button>
+          <span id="page-indicator" style="font-family:'DM Mono',monospace;font-size:11px;">— / —</span>
+          <button id="next-btn" onclick="gotoPage(currentPage+1)">›</button>
+        </div>
+      </div>
+      <div class="editor-wrapper">
+        <div class="editor-inner">
+          <div class="page-heading" id="page-heading">Página 1</div>
+          <textarea id="editor" spellcheck="true" placeholder="El texto de la página aparecerá aquí..."></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- Custom instruction bar -->
+    <div class="custom-bar" id="custom-bar">
+      <input type="text" id="custom-input" placeholder="Ej: Convierte el texto a tono más formal..." />
+      <button onclick="runCustom()">Aplicar</button>
+      <button class="cancel-custom" onclick="hideCustomBar()">Cancelar</button>
+    </div>
+
+    <!-- AI output panel -->
+    <div class="ai-panel" id="ai-panel">
+      <div class="ai-panel-header">
+        <span class="ai-badge">IA</span>
+        <span id="ai-tool-label">Resultado</span>
+        <button onclick="closeAiPanel()" title="Cerrar">✕</button>
+      </div>
+      <div class="ai-output" id="ai-output"></div>
+      <div class="ai-actions">
+        <button class="ai-action-btn ai-accept" id="accept-btn" onclick="acceptSuggestion()">✓ Aceptar cambios</button>
+        <button class="ai-action-btn ai-discard" onclick="closeAiPanel()">Descartar</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+let pages = [];
+let currentPage = 0;
+let editCount = 0;
+let lastAiResult = '';
+let lastToolType = '';
+
+const editor = document.getElementById('editor');
+const editorContainer = document.getElementById('editor-container');
+const emptyState = document.getElementById('empty-state');
+
+// File input
+document.getElementById('file-input').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  document.getElementById('file-info').textContent = `Cargando "${file.name}"...`;
+  await loadPdf(file);
+  document.getElementById('file-info').textContent = file.name;
+  e.target.value = '';
+});
+
+// Editor changes
+editor.addEventListener('input', () => {
+  if (pages.length) {
+    pages[currentPage] = editor.value;
+    editCount++;
+    document.getElementById('stat-edits').textContent = editCount;
+    updateStats();
+  }
+});
+
+async function loadPdf(file) {
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    pages = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const text = content.items.map(item => item.str).join(' ').replace(/\s+/g, ' ').trim();
+      pages.push(text);
+    }
+    initEditor();
+    showToast(`📖 ${pdf.numPages} páginas cargadas`);
+  } catch (err) {
+    showToast('Error al cargar el PDF', 'error');
+    console.error(err);
+  }
+}
+
+function initEditor() {
+  emptyState.style.display = 'none';
+  editorContainer.style.display = 'flex';
+  document.getElementById('export-btn').style.display = '';
+
+  // Enable AI tools
+  document.querySelectorAll('.tool-btn').forEach(b => b.disabled = false);
+
+  buildPageList();
+  gotoPage(0);
+  updateStats();
+}
+
+function buildPageList() {
+  const list = document.getElementById('page-list');
+  list.innerHTML = '';
+  pages.forEach((_, i) => {
+    const div = document.createElement('div');
+    div.className = 'page-item' + (i === 0 ? ' active' : '');
+    div.innerHTML = `<span class="page-num">${String(i+1).padStart(2,'0')}</span> Página ${i+1}`;
+    div.onclick = () => gotoPage(i);
+    list.appendChild(div);
+  });
+}
+
+function gotoPage(idx) {
+  if (idx < 0 || idx >= pages.length) return;
+  // Save current
+  if (pages.length) pages[currentPage] = editor.value;
+  currentPage = idx;
+  editor.value = pages[currentPage];
+  document.getElementById('page-heading').textContent = `Página ${currentPage + 1}`;
+  document.getElementById('page-indicator').textContent = `${currentPage+1} / ${pages.length}`;
+  document.getElementById('prev-btn').disabled = currentPage === 0;
+  document.getElementById('next-btn').disabled = currentPage === pages.length - 1;
+  document.querySelectorAll('.page-item').forEach((el, i) => {
+    el.classList.toggle('active', i === currentPage);
+  });
+  closeAiPanel();
+}
+
+function updateStats() {
+  const allText = pages.join(' ');
+  const words = allText.split(/\s+/).filter(w => w.length > 0).length;
+  const chars = allText.replace(/\s/g, '').length;
+  document.getElementById('stat-pages').textContent = pages.length;
+  document.getElementById('stat-words').textContent = words > 999 ? (words/1000).toFixed(1)+'k' : words;
+  document.getElementById('stat-chars').textContent = chars > 999 ? (chars/1000).toFixed(1)+'k' : chars;
+}
+
+// ── AI TOOLS ──
+const toolPrompts = {
+  rewrite:   { label: 'Reescribir párrafo', prompt: p => `Reescribe el siguiente texto de forma más clara, fluida y literaria, manteniendo el mismo sentido y tono:\n\n${p}` },
+  grammar:   { label: 'Corrección gramatical', prompt: p => `Corrige todos los errores gramaticales, ortográficos y de puntuación del siguiente texto. Devuelve únicamente el texto corregido:\n\n${p}` },
+  summarize: { label: 'Resumen de página', prompt: p => `Crea un resumen conciso (3-5 párrafos) del siguiente texto:\n\n${p}` },
+  expand:    { label: 'Texto expandido', prompt: p => `Expande y enriquece el siguiente texto con más detalles, ejemplos y descripción, sin cambiar el mensaje central:\n\n${p}` },
+  translate: { label: 'Traducción al inglés', prompt: p => `Traduce el siguiente texto al inglés de manera natural y literaria:\n\n${p}` },
+};
+
+async function runTool(type) {
+  const text = getSelection() || editor.value;
+  if (!text.trim()) { showToast('No hay texto para procesar'); return; }
+  lastToolType = type;
+  const cfg = toolPrompts[type];
+  await callClaude(cfg.prompt(text), cfg.label, type !== 'summarize');
+}
+
+function getSelection() {
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  if (start !== end) return editor.value.substring(start, end);
+  return '';
+}
+
+function showCustomBar() {
+  document.getElementById('custom-bar').classList.add('visible');
+  document.getElementById('custom-input').focus();
+}
+function hideCustomBar() {
+  document.getElementById('custom-bar').classList.remove('visible');
+}
+async function runCustom() {
+  const instruction = document.getElementById('custom-input').value.trim();
+  if (!instruction) return;
+  const text = getSelection() || editor.value;
+  lastToolType = 'custom';
+  await callClaude(`${instruction}\n\nTexto:\n\n${text}`, 'Instrucción personalizada', true);
+  hideCustomBar();
+}
+
+async function callClaude(userPrompt, label, showAccept = true) {
+  setToolsLoading(true);
+  showAiPanel(label, '<span class="spinner"></span> Procesando con IA...', false);
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: 'Eres un editor literario profesional. Respondes únicamente con el texto solicitado, sin explicaciones ni prefijos.',
+        messages: [{ role: 'user', content: userPrompt }]
+      })
+    });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error.message);
+    lastAiResult = data.content[0].text;
+    showAiPanel(label, lastAiResult, showAccept);
+  } catch (err) {
+    showAiPanel(label, `<span style="color:var(--error)">Error: ${err.message}</span>`, false);
+  }
+  setToolsLoading(false);
+}
+
+function showAiPanel(label, content, showAccept) {
+  const panel = document.getElementById('ai-panel');
+  panel.classList.add('visible');
+  document.getElementById('ai-tool-label').textContent = label;
+  document.getElementById('ai-output').innerHTML = content;
+  document.getElementById('accept-btn').style.display = showAccept ? '' : 'none';
+}
+function closeAiPanel() {
+  document.getElementById('ai-panel').classList.remove('visible');
+  lastAiResult = '';
+}
+
+function acceptSuggestion() {
+  if (!lastAiResult) return;
+  const sel = getSelection();
+  if (sel && sel.trim()) {
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    editor.value = editor.value.substring(0, start) + lastAiResult + editor.value.substring(end);
+  } else {
+    editor.value = lastAiResult;
+  }
+  pages[currentPage] = editor.value;
+  editCount++;
+  document.getElementById('stat-edits').textContent = editCount;
+  updateStats();
+  closeAiPanel();
+  showToast('✓ Cambios aplicados');
+}
+
+function setToolsLoading(loading) {
+  document.querySelectorAll('.tool-btn').forEach(b => b.disabled = loading);
+}
+
+// ── UTILITIES ──
+function copyPage() {
+  navigator.clipboard.writeText(editor.value);
+  showToast('📋 Página copiada');
+}
+
+function exportTxt() {
+  const all = pages.join('\n\n────────────────\n\n');
+  const blob = new Blob([all], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'libro_editado.txt';
+  a.click();
+  showToast('↓ Exportando...');
+}
+
+function showToast(msg, type) {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.classList.add('show');
+  if (type === 'error') toast.style.background = 'var(--error)';
+  else toast.style.background = 'var(--ink)';
+  setTimeout(() => toast.classList.remove('show'), 2500);
+}
+
+// Enter on custom input
+document.getElementById('custom-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') runCustom();
+  if (e.key === 'Escape') hideCustomBar();
+});
+</script>
+</body>
+</html>
