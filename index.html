@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
-<title>BookEdit</title>
+<title>PDF Annotator</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
@@ -208,7 +208,7 @@ header{
     <button class="t on" id="t-pen"       onclick="setTool('pen')">✏️<span class="tip">Pluma  [P]</span></button>
     <button class="t"    id="t-ink"       onclick="setTool('ink')">🖊<span class="tip">Tinta  [I]</span></button>
     <button class="t"    id="t-highlight" onclick="setTool('highlight')">🖍<span class="tip">Resaltador  [H]</span></button>
-    <button class="t"    id="t-eraser"    onclick="setTool('eraser')">⬜<span class="tip">Borrador  [E]</span></button>
+    <button class="t"    id="t-eraser"    onclick="setTool('eraser')">⌫<span class="tip">Borrador  [E]</span></button>
     <div class="rail-sep"></div>
     <button class="t"    id="t-line"      onclick="setTool('line')">╱<span class="tip">Línea</span></button>
     <button class="t"    id="t-rect"      onclick="setTool('rect')">▭<span class="tip">Rectángulo</span></button>
@@ -285,27 +285,53 @@ let fileName='';
 let idxOpen=true;
 
 // ── INDEXEDDB AUTO-SAVE ──
+// Strategy: save on a 3-minute interval (never during drawing).
+// Also save immediately on page hide / beforeunload as safety net.
+// toDataURL is expensive — we run it inside requestIdleCallback so it
+// never competes with pointer events on the main thread.
 let db=null;
 (()=>{
-  const r=indexedDB.open('pdf-ann-v3',1);
+  const r=indexedDB.open('pdf-ann-v4',1);
   r.onupgradeneeded=e=>e.target.result.createObjectStore('ann');
   r.onsuccess=e=>{db=e.target.result};
 })();
 
-let saveTimer=null;
-function scheduleSave(){
-  setSaveState('saving');
-  clearTimeout(saveTimer);
-  saveTimer=setTimeout(persist,1000);
+let dirty=false;          // true = unsaved changes exist
+let saveIntervalId=null;
+
+function markDirty(){
+  dirty=true;
+  setSaveState('pending');
 }
+
+// Start the 3-minute auto-save clock once a file is loaded
+function startAutoSave(){
+  clearInterval(saveIntervalId);
+  saveIntervalId=setInterval(()=>{
+    if(dirty&&!drawing) persistIdle();
+  }, 3*60*1000); // 3 minutes
+}
+
+// Run persist during browser idle time so drawing is never interrupted
+function persistIdle(){
+  if('requestIdleCallback' in window){
+    requestIdleCallback(()=>persist(),{timeout:4000});
+  } else {
+    setTimeout(persist,200);
+  }
+}
+
 function persist(){
-  if(!db||!fileName) return;
+  if(!db||!fileName||!dirty)return;
+  setSaveState('saving');
+  // Collect dataURLs — expensive but now always off the critical path
   const d={};
   wrappers.forEach(({annC,pg})=>{d[pg]=annC.toDataURL('image/png')});
   const tx=db.transaction('ann','readwrite');
   tx.objectStore('ann').put(d,fileName);
-  tx.oncomplete=()=>setSaveState('saved');
+  tx.oncomplete=()=>{dirty=false;setSaveState('saved')};
 }
+
 function loadSaved(name){
   return new Promise(res=>{
     if(!db){res(null);return}
@@ -318,9 +344,16 @@ function loadSaved(name){
 function setSaveState(s){
   const dot=document.getElementById('save-dot');
   const txt=document.getElementById('save-txt');
-  dot.className='save-dot'+(s==='saving'?' saving':s==='saved'?' saved':'');
-  txt.textContent=s==='saving'?'Guardando…':'Guardado automáticamente';
+  const map={saving:'saving',saved:'saved',pending:''};
+  dot.className='save-dot'+(map[s]?' '+map[s]:'');
+  txt.textContent=s==='saving'?'Guardando…':s==='pending'?'Con cambios sin guardar':'Guardado automáticamente';
 }
+
+// Save on visibility change (switching tabs, closing browser)
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='hidden'&&dirty) persist();
+});
+window.addEventListener('beforeunload',()=>{if(dirty)persist()});
 
 // ── FILE LOAD ──
 document.getElementById('file-in').addEventListener('change',async e=>{
@@ -342,6 +375,7 @@ document.getElementById('file-in').addEventListener('change',async e=>{
   document.getElementById('pg-total').textContent='/ '+totalPgs;
   if(saved) toast('🔄 Anotaciones restauradas');
   else setSaveState('saved');
+  startAutoSave();
   e.target.value='';
 });
 
@@ -445,26 +479,73 @@ function smoothDraw(ctx,pts,lw,col,alpha,comp){
   ctx.restore();
 }
 
+// ── ERASER CURSOR ──
+const eraserCursor=document.createElement('div');
+eraserCursor.style.cssText='position:fixed;pointer-events:none;border:2px solid rgba(255,255,255,0.7);border-radius:50%;z-index:1000;display:none;transform:translate(-50%,-50%)';
+document.body.appendChild(eraserCursor);
+
+function showEraserCursor(x,y,r){
+  const d=r*2+'px';
+  eraserCursor.style.width=d;eraserCursor.style.height=d;
+  eraserCursor.style.left=x+'px';eraserCursor.style.top=y+'px';
+  eraserCursor.style.display='block';
+}
+function hideEraserCursor(){eraserCursor.style.display='none'}
+
 function setupPointer(canvas,pg){
+  // Track last point for incremental eraser
+  let lastEX=0,lastEY=0;
+
   canvas.addEventListener('pointerdown',e=>{
     if(tool==='text'){addText(e,canvas,pg);return;}
     canvas.setPointerCapture(e.pointerId);
     drawing=true;
     activeAnn=canvas;activeCtx=canvas.getContext('2d');
     const {x,y}=gp(e,canvas);
-    // Snapshot canvas state BEFORE this stroke
-    preSnap=activeCtx.getImageData(0,0,canvas.width,canvas.height);
-    ptBuf=[{x,y,p:e.pressure||0.5}];
+    lastEX=x;lastEY=y;
+
+    if(tool==='eraser'){
+      // Eraser: no snapshot needed, just draw incrementally
+      const ctx=activeCtx;
+      ctx.save();
+      ctx.globalCompositeOperation='destination-out';
+      ctx.globalAlpha=1;
+      ctx.beginPath();ctx.arc(x,y,sz*3,0,Math.PI*2);ctx.fill();
+      ctx.restore();
+    } else {
+      // For drawing tools: snapshot canvas state BEFORE this stroke
+      // Use structuredClone-free approach: only snapshot for tools that redraw on move
+      preSnap=activeCtx.getImageData(0,0,canvas.width,canvas.height);
+      ptBuf=[{x,y,p:e.pressure||0.5}];
+    }
   },{passive:true});
 
   canvas.addEventListener('pointermove',e=>{
+    if(tool==='eraser'){
+      // Show visual cursor
+      showEraserCursor(e.clientX,e.clientY,sz*3*(canvas.getBoundingClientRect().width/canvas.width));
+      if(!drawing)return;
+      const {x,y}=gp(e,canvas);
+      const ctx=activeCtx||canvas.getContext('2d');
+      ctx.save();
+      ctx.globalCompositeOperation='destination-out';
+      ctx.globalAlpha=1;
+      ctx.lineWidth=sz*6;
+      ctx.lineCap='round';
+      ctx.beginPath();ctx.moveTo(lastEX,lastEY);ctx.lineTo(x,y);ctx.stroke();
+      // Also fill circle at current position for solid erase
+      ctx.beginPath();ctx.arc(x,y,sz*3,0,Math.PI*2);ctx.fill();
+      ctx.restore();
+      lastEX=x;lastEY=y;
+      return;
+    }
     if(!drawing)return;
     const {x,y}=gp(e,canvas);
     const p=Math.max(0.05,e.pressure||0.5);
     ptBuf.push({x,y,p});
     const ctx=activeCtx;
 
-    // Restore snapshot → redraw whole stroke from scratch (enables smooth curves)
+    // Restore snapshot → redraw whole stroke from scratch (smooth curves)
     ctx.putImageData(preSnap,0,0);
 
     if(tool==='pen'){
@@ -473,8 +554,6 @@ function setupPointer(canvas,pg){
       smoothDraw(ctx,ptBuf,sz*2,color,0.78,'source-over');
     } else if(tool==='highlight'){
       smoothDraw(ctx,ptBuf,sz*7,color,0.28,'source-over');
-    } else if(tool==='eraser'){
-      smoothDraw(ctx,ptBuf,sz*5,'rgba(0,0,0,1)',1,'destination-out');
     } else {
       // Shape preview
       const s=ptBuf[0],c=ptBuf[ptBuf.length-1];
@@ -495,17 +574,22 @@ function setupPointer(canvas,pg){
   const endStroke=e=>{
     if(!drawing)return;
     drawing=false;
-    const ctx=activeCtx;
+    hideEraserCursor();
+    const ctx=activeCtx||canvas.getContext('2d');
     ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
     if(!annData[pg])annData[pg]=[];
+    // Save snapshot for undo — only getImageData here (on stroke END, not during move)
     annData[pg].push({imgData:ctx.getImageData(0,0,canvas.width,canvas.height),w:canvas.width,h:canvas.height});
     ptBuf=[];preSnap=null;
     updateThumb(pg);
-    scheduleSave();
+    markDirty(); // Just flag as dirty — actual save happens on 3-min timer or tab close
   };
   canvas.addEventListener('pointerup',endStroke,{passive:true});
   canvas.addEventListener('pointercancel',endStroke,{passive:true});
-  canvas.addEventListener('pointerleave',endStroke,{passive:true});
+  canvas.addEventListener('pointerleave',e=>{
+    hideEraserCursor();
+    endStroke(e);
+  },{passive:true});
 }
 
 // ── TEXT TOOL ──
@@ -538,7 +622,7 @@ function commitTxt(){
     v.split('\n').forEach((ln,i)=>ctx.fillText(ln,txtX,txtY+fsize*(i+1)));
     if(!annData[txtPg])annData[txtPg]=[];
     annData[txtPg].push({imgData:ctx.getImageData(0,0,txtCvs.width,txtCvs.height),w:txtCvs.width,h:txtCvs.height});
-    updateThumb(txtPg);scheduleSave();
+    updateThumb(txtPg);markDirty();
   }
   cancelTxt();
 }
@@ -606,7 +690,7 @@ function undoPage(){
     const ctx=e.annC.getContext('2d');
     ctx.clearRect(0,0,e.annC.width,e.annC.height);
     if(snaps.length)ctx.putImageData(snaps[snaps.length-1].imgData,0,0);
-    updateThumb(curPage);scheduleSave();
+    updateThumb(curPage);markDirty();
     toast('↩ Deshecho');
   }
 }
@@ -614,7 +698,7 @@ function clearPage(){
   const e=wrappers.find(w=>w.pg===curPage);if(!e)return;
   e.annC.getContext('2d').clearRect(0,0,e.annC.width,e.annC.height);
   annData[curPage]=[];
-  updateThumb(curPage);scheduleSave();
+  updateThumb(curPage);markDirty();
   toast('🗑 Página limpiada');
 }
 
@@ -652,9 +736,10 @@ function doZoom(d,reset=false){
 // ── TOOLS ──
 function setTool(t){
   tool=t;
+  if(t!=='eraser') hideEraserCursor();
   document.querySelectorAll('.t').forEach(b=>b.classList.remove('on'));
   const el=document.getElementById('t-'+t);if(el)el.classList.add('on');
-  const cur=t==='eraser'?'cell':t==='text'?'text':'crosshair';
+  const cur=t==='eraser'?'none':t==='text'?'text':'crosshair';
   document.querySelectorAll('.c-ann').forEach(c=>c.style.cursor=cur);
 }
 function setColor(el){
