@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
-<title>PDF Annotator</title>
+<title>BookEdit</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
@@ -123,6 +123,29 @@ header{
   flex:1;overflow:auto;background:#1a1a1e;
   display:flex;flex-direction:column;align-items:center;
   padding:20px;gap:20px;position:relative;
+  /* Allow touch scroll by default; JS locks it when pen is active */
+}
+/* When pen is writing, block touch-driven scroll on the area */
+.canvas-area.pen-active{
+  overflow:hidden;
+  touch-action:none;
+}
+/* Palm rejection badge */
+.palm-badge{
+  position:fixed;top:60px;right:14px;
+  background:rgba(232,201,122,0.12);
+  border:1px solid rgba(232,201,122,0.3);
+  color:var(--accent);
+  font-size:10px;font-weight:600;letter-spacing:.06em;
+  padding:4px 10px;border-radius:20px;
+  opacity:0;pointer-events:none;
+  transition:opacity .25s;z-index:50;
+  display:flex;align-items:center;gap:5px;
+}
+.palm-badge.show{opacity:1}
+.palm-badge .pb-dot{
+  width:6px;height:6px;border-radius:50%;
+  background:var(--accent);animation:pulse .9s infinite;
 }
 .page-wrap{position:relative;flex-shrink:0;box-shadow:0 6px 40px rgba(0,0,0,.6);}
 .page-wrap canvas{display:block;position:absolute;top:0;left:0}
@@ -203,6 +226,10 @@ header{
   <input type="file" id="file-in" accept=".pdf"/>
 </header>
 
+<div class="palm-badge" id="palm-badge">
+  <span class="pb-dot"></span> Rechazo de palma activo
+</div>
+
 <div class="app-body">
   <div class="tool-rail">
     <button class="t on" id="t-pen"       onclick="setTool('pen')">✏️<span class="tip">Pluma  [P]</span></button>
@@ -244,7 +271,7 @@ header{
   <div class="canvas-area" id="canvas-area">
     <div class="empty" id="empty">
       <div class="e-icon">📄</div>
-      <h2>PDF Annotator</h2>
+      <h2>BookEdit</h2>
       <p>Carga un PDF y anota con tu pluma, resaltador, formas o texto. Las anotaciones se guardan automáticamente.</p>
       <button class="e-btn" onclick="document.getElementById('file-in').click()">Abrir PDF →</button>
     </div>
@@ -481,9 +508,8 @@ function smoothDraw(ctx,pts,lw,col,alpha,comp){
 
 // ── ERASER CURSOR ──
 const eraserCursor=document.createElement('div');
-eraserCursor.style.cssText='position:fixed;pointer-events:none;border:2px solid rgba(255,255,255,0.7);border-radius:50%;z-index:1000;display:none;transform:translate(-50%,-50%)';
+eraserCursor.style.cssText='position:fixed;pointer-events:none;border:2px solid rgba(255,255,255,0.75);border-radius:50%;z-index:1000;display:none;transform:translate(-50%,-50%);mix-blend-mode:difference';
 document.body.appendChild(eraserCursor);
-
 function showEraserCursor(x,y,r){
   const d=r*2+'px';
   eraserCursor.style.width=d;eraserCursor.style.height=d;
@@ -492,104 +518,165 @@ function showEraserCursor(x,y,r){
 }
 function hideEraserCursor(){eraserCursor.style.display='none'}
 
-function setupPointer(canvas,pg){
-  // Track last point for incremental eraser
-  let lastEX=0,lastEY=0;
+// ── PALM REJECTION ──
+// pointerType === 'pen'   → real stylus/e-pen  ✓ draw
+// pointerType === 'mouse' → mouse              ✓ draw (for desktop testing)
+// pointerType === 'touch' → finger OR palm     ✗ never draw
+//
+// Additionally: even for touch events, if the contact area is large
+// (width/height > PALM_THRESHOLD px) it's a palm — block scroll too
+// while any pen pointer is active.
+const PALM_THRESHOLD = 40; // px contact size that means "palm, not finger"
+const canvasArea = document.getElementById('canvas-area');
+let penActiveCount = 0;   // how many pen pointers are currently down
+let palmBadgeTimer = null;
 
-  canvas.addEventListener('pointerdown',e=>{
-    if(tool==='text'){addText(e,canvas,pg);return;}
+function penDown() {
+  penActiveCount++;
+  if (penActiveCount === 1) {
+    // First pen contact — lock scroll so palm can't pan the document
+    canvasArea.classList.add('pen-active');
+    showPalmBadge();
+  }
+}
+function penUp() {
+  penActiveCount = Math.max(0, penActiveCount - 1);
+  if (penActiveCount === 0) {
+    canvasArea.classList.remove('pen-active');
+    hidePalmBadge();
+  }
+}
+function showPalmBadge() {
+  clearTimeout(palmBadgeTimer);
+  document.getElementById('palm-badge').classList.add('show');
+}
+function hidePalmBadge() {
+  // Keep badge visible 1.5s after pen lifts so user sees it working
+  clearTimeout(palmBadgeTimer);
+  palmBadgeTimer = setTimeout(() => {
+    document.getElementById('palm-badge').classList.remove('show');
+  }, 1500);
+}
+
+// Block any touch-scroll while pen is writing
+canvasArea.addEventListener('touchstart', e => {
+  if (penActiveCount > 0) e.preventDefault();
+}, { passive: false });
+canvasArea.addEventListener('touchmove', e => {
+  if (penActiveCount > 0) e.preventDefault();
+}, { passive: false });
+
+function isPalmContact(e) {
+  // Large contact area = palm resting on screen
+  return (e.width > PALM_THRESHOLD || e.height > PALM_THRESHOLD);
+}
+function isDrawPointer(e) {
+  // Only draw with pen or mouse — never with touch (finger/palm)
+  return e.pointerType === 'pen' || e.pointerType === 'mouse';
+}
+
+function setupPointer(canvas, pg) {
+  let lastEX = 0, lastEY = 0;
+
+  canvas.addEventListener('pointerdown', e => {
+    // ── PALM REJECTION: ignore all touch input ──
+    if (!isDrawPointer(e)) return;
+    if (isPalmContact(e)) return; // safety net for large-contact stylus glitches
+
+    if (tool === 'text') { addText(e, canvas, pg); return; }
+
     canvas.setPointerCapture(e.pointerId);
-    drawing=true;
-    activeAnn=canvas;activeCtx=canvas.getContext('2d');
-    const {x,y}=gp(e,canvas);
-    lastEX=x;lastEY=y;
+    drawing = true;
+    penDown();
+    activeAnn = canvas; activeCtx = canvas.getContext('2d');
+    const { x, y } = gp(e, canvas);
+    lastEX = x; lastEY = y;
 
-    if(tool==='eraser'){
-      // Eraser: no snapshot needed, just draw incrementally
-      const ctx=activeCtx;
+    if (tool === 'eraser') {
+      const ctx = activeCtx;
       ctx.save();
-      ctx.globalCompositeOperation='destination-out';
-      ctx.globalAlpha=1;
-      ctx.beginPath();ctx.arc(x,y,sz*3,0,Math.PI*2);ctx.fill();
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.globalAlpha = 1;
+      ctx.beginPath(); ctx.arc(x, y, sz * 3, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
     } else {
-      // For drawing tools: snapshot canvas state BEFORE this stroke
-      // Use structuredClone-free approach: only snapshot for tools that redraw on move
-      preSnap=activeCtx.getImageData(0,0,canvas.width,canvas.height);
-      ptBuf=[{x,y,p:e.pressure||0.5}];
+      preSnap = activeCtx.getImageData(0, 0, canvas.width, canvas.height);
+      ptBuf = [{ x, y, p: e.pressure || 0.5 }];
     }
-  },{passive:true});
+  }, { passive: true });
 
-  canvas.addEventListener('pointermove',e=>{
-    if(tool==='eraser'){
-      // Show visual cursor
-      showEraserCursor(e.clientX,e.clientY,sz*3*(canvas.getBoundingClientRect().width/canvas.width));
-      if(!drawing)return;
-      const {x,y}=gp(e,canvas);
-      const ctx=activeCtx||canvas.getContext('2d');
+  canvas.addEventListener('pointermove', e => {
+    // ── PALM REJECTION ──
+    if (!isDrawPointer(e)) return;
+    if (isPalmContact(e)) return;
+
+    if (tool === 'eraser') {
+      showEraserCursor(e.clientX, e.clientY, sz * 3 * (canvas.getBoundingClientRect().width / canvas.width));
+      if (!drawing) return;
+      const { x, y } = gp(e, canvas);
+      const ctx = activeCtx || canvas.getContext('2d');
       ctx.save();
-      ctx.globalCompositeOperation='destination-out';
-      ctx.globalAlpha=1;
-      ctx.lineWidth=sz*6;
-      ctx.lineCap='round';
-      ctx.beginPath();ctx.moveTo(lastEX,lastEY);ctx.lineTo(x,y);ctx.stroke();
-      // Also fill circle at current position for solid erase
-      ctx.beginPath();ctx.arc(x,y,sz*3,0,Math.PI*2);ctx.fill();
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = sz * 6; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(lastEX, lastEY); ctx.lineTo(x, y); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, sz * 3, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
-      lastEX=x;lastEY=y;
+      lastEX = x; lastEY = y;
       return;
     }
-    if(!drawing)return;
-    const {x,y}=gp(e,canvas);
-    const p=Math.max(0.05,e.pressure||0.5);
-    ptBuf.push({x,y,p});
-    const ctx=activeCtx;
 
-    // Restore snapshot → redraw whole stroke from scratch (smooth curves)
-    ctx.putImageData(preSnap,0,0);
+    if (!drawing) return;
+    const { x, y } = gp(e, canvas);
+    const p = Math.max(0.05, e.pressure || 0.5);
+    ptBuf.push({ x, y, p });
+    const ctx = activeCtx;
 
-    if(tool==='pen'){
-      smoothDraw(ctx,ptBuf,sz,color,1,'source-over');
-    } else if(tool==='ink'){
-      smoothDraw(ctx,ptBuf,sz*2,color,0.78,'source-over');
-    } else if(tool==='highlight'){
-      smoothDraw(ctx,ptBuf,sz*7,color,0.28,'source-over');
+    ctx.putImageData(preSnap, 0, 0);
+
+    if (tool === 'pen') {
+      smoothDraw(ctx, ptBuf, sz, color, 1, 'source-over');
+    } else if (tool === 'ink') {
+      smoothDraw(ctx, ptBuf, sz * 2, color, 0.78, 'source-over');
+    } else if (tool === 'highlight') {
+      smoothDraw(ctx, ptBuf, sz * 7, color, 0.28, 'source-over');
     } else {
-      // Shape preview
-      const s=ptBuf[0],c=ptBuf[ptBuf.length-1];
+      const s = ptBuf[0], c = ptBuf[ptBuf.length - 1];
       ctx.save();
-      ctx.strokeStyle=color;ctx.lineWidth=sz;
-      ctx.lineCap='round';ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+      ctx.strokeStyle = color; ctx.lineWidth = sz;
+      ctx.lineCap = 'round'; ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
       ctx.beginPath();
-      if(tool==='line'){ctx.moveTo(s.x,s.y);ctx.lineTo(c.x,c.y);}
-      else if(tool==='rect'){ctx.rect(s.x,s.y,c.x-s.x,c.y-s.y);}
-      else{
-        const rx=Math.abs(c.x-s.x)/2,ry=Math.abs(c.y-s.y)/2;
-        ctx.ellipse(s.x+(c.x-s.x)/2,s.y+(c.y-s.y)/2,rx||1,ry||1,0,0,Math.PI*2);
+      if (tool === 'line') { ctx.moveTo(s.x, s.y); ctx.lineTo(c.x, c.y); }
+      else if (tool === 'rect') { ctx.rect(s.x, s.y, c.x - s.x, c.y - s.y); }
+      else {
+        const rx = Math.abs(c.x - s.x) / 2, ry = Math.abs(c.y - s.y) / 2;
+        ctx.ellipse(s.x + (c.x - s.x) / 2, s.y + (c.y - s.y) / 2, rx || 1, ry || 1, 0, 0, Math.PI * 2);
       }
-      ctx.stroke();ctx.restore();
+      ctx.stroke(); ctx.restore();
     }
-  },{passive:true});
+  }, { passive: true });
 
-  const endStroke=e=>{
-    if(!drawing)return;
-    drawing=false;
+  const endStroke = e => {
+    if (!isDrawPointer(e)) return;
+    if (!drawing) return;
+    drawing = false;
+    penUp();
     hideEraserCursor();
-    const ctx=activeCtx||canvas.getContext('2d');
-    ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
-    if(!annData[pg])annData[pg]=[];
-    // Save snapshot for undo — only getImageData here (on stroke END, not during move)
-    annData[pg].push({imgData:ctx.getImageData(0,0,canvas.width,canvas.height),w:canvas.width,h:canvas.height});
-    ptBuf=[];preSnap=null;
+    const ctx = activeCtx || canvas.getContext('2d');
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+    if (!annData[pg]) annData[pg] = [];
+    annData[pg].push({ imgData: ctx.getImageData(0, 0, canvas.width, canvas.height), w: canvas.width, h: canvas.height });
+    ptBuf = []; preSnap = null;
     updateThumb(pg);
-    markDirty(); // Just flag as dirty — actual save happens on 3-min timer or tab close
+    markDirty();
   };
-  canvas.addEventListener('pointerup',endStroke,{passive:true});
-  canvas.addEventListener('pointercancel',endStroke,{passive:true});
-  canvas.addEventListener('pointerleave',e=>{
+
+  canvas.addEventListener('pointerup', endStroke, { passive: true });
+  canvas.addEventListener('pointercancel', endStroke, { passive: true });
+  canvas.addEventListener('pointerleave', e => {
     hideEraserCursor();
     endStroke(e);
-  },{passive:true});
+  }, { passive: true });
 }
 
 // ── TEXT TOOL ──
